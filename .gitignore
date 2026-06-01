@@ -184,3 +184,12 @@ repomix-output.*
 
 # Personal todo list
 todo.md
+
+# Analysis engine — large downloaded files, never commit
+data/bulk/
+data/duckdb/
+data/scryfall_identity.json
+
+# Keep artifacts (precomputed parquet/model files) tracked
+!data/artifacts/
+!data/.gitkeep

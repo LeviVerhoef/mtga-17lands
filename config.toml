@@ -1,0 +1,49 @@
+[arena]
+# Path to Arena Player.log — adjust username if different.
+# Windows: C:\Users\<you>\AppData\LocalLow\Wizards of The Coast\MTGA\Player.log
+log_path = ""   # leave blank to auto-detect
+
+[overlay]
+# Default draft format for 17Lands lookups.
+# Options: PremierDraft, TradDraft, QuickDraft
+default_format = "PremierDraft"
+
+# Show/hide hotkey (e.g. "ctrl+shift+d")
+hotkey = "ctrl+shift+d"
+
+# Opacity 0.0 (transparent) to 1.0 (opaque)
+opacity = 0.9
+
+[stats]
+# Primary sort column for the pack table.
+# Options: gihwr, alsa, ata, ohwr, gdwr, iwd
+primary_sort = "gihwr"
+
+# Color pair filter mode.
+# "auto"    = infer from your pool after pick 15
+# "all"     = always show all-deck win rates
+# "WU"|"UB" etc = lock to a specific pair
+color_filter = "auto"
+
+[analysis]
+# How many pool k-NN neighbors to aggregate over.
+knn_k = 50
+
+# Minimum sample size before showing synergy deltas.
+min_synergy_games = 100
+
+# Blend weights for the combined recommendation score.
+# Components: gihwr, synergy_delta, trophy_pick_rate_delta, similar_pool_rate
+# Set any weight to 0 to disable that component.
+blend_gihwr = 0.50
+blend_synergy = 0.20
+blend_trophy = 0.15
+blend_similar_pool = 0.15
+
+[cache]
+# Refresh live 17Lands stats after this many hours.
+stats_ttl_hours = 24
+
+# Where to store bulk datasets (can be a large drive path).
+# Leave blank to use the default (data/bulk/).
+bulk_data_dir = ""

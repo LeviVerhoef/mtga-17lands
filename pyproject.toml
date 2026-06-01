@@ -2,11 +2,13 @@
 name = "mtga-draft-tool"
 version = "4.16"
 description = "Magic: The Gathering Arena draft tool that utilizes 17Lands data."
-authors = ["unrealities"]
+authors = ["unrealities", "LeviVerhoef"]
 readme = "README.md"
 packages = [
     { include = "src" },
-    { include = "server" }
+    { include = "server" },
+    { include = "identity" },
+    { include = "analysis" },
 ]
 
 [tool.poetry.dependencies]
@@ -20,6 +22,12 @@ ttkbootstrap = "1.20.3"
 numba = "0.65.1"
 scipy = "1.17.1"
 pywin32 = {version = "306", markers = "sys_platform == 'win32'"}
+# Analysis engine deps
+duckdb = ">=1.1"
+httpx = ">=0.27"
+
+[tool.poetry.group.analysis.dependencies]
+polars = ">=1.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "9.0.3"
