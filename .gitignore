@@ -185,6 +185,9 @@ repomix-output.*
 # Personal todo list
 todo.md
 
+# Simulator / dev logs
+test_logs/
+
 # Analysis engine — large downloaded files, never commit
 data/bulk/
 data/duckdb/
