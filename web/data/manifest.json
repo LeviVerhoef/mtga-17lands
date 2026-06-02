@@ -1,0 +1,31 @@
+{
+  "generated_at": "2026-06-02T08:58:30.454341+00:00",
+  "sets": [
+    {
+      "set": "BLB",
+      "format": "PremierDraft",
+      "state": "frozen",
+      "source_last_modified": "2024-10-08T15:16:48+00:00",
+      "context": {
+        "file": "BLB.PremierDraft.context.json",
+        "url": "BLB.PremierDraft.context.json",
+        "sha256": "0def14909d3bf93979b95ad4166bc689697aac9f3c82186876c4f72bee6ad0e1",
+        "bytes": 650731,
+        "generated_at": "2026-06-02T08:58:18.603737+00:00"
+      }
+    },
+    {
+      "set": "SOS",
+      "format": "PremierDraft",
+      "state": "active",
+      "source_last_modified": "2026-05-14T12:12:22+00:00",
+      "context": {
+        "file": "SOS.PremierDraft.context.json",
+        "url": "SOS.PremierDraft.context.json",
+        "sha256": "347518c14c19b150972ff529b198bd8dcfcecea13536132a09b9bf90b17d3ffd",
+        "bytes": 908803,
+        "generated_at": "2026-06-02T08:58:19.691848+00:00"
+      }
+    }
+  ]
+}

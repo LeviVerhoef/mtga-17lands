@@ -80,9 +80,25 @@ python3 -m analysis.export_web --expansion SOS  # a single set
 
 Converts the committed parquet artifacts into a compact
 `web/data/<SET>.<FORMAT>.context.json` (~0.3–0.9 MB/set) that the future
-Overwolf front-end loads. It reproduces the exact trophy / co-occurrence /
-synergy signals from `analysis.context_advisor`. See
-`docs/06-overwolf-overlay-plan.md` for the overlay plan.
+Overwolf front-end loads. The bundle includes the win-rate metrics
+(GIHWR/OHWR/GDWR/GPWR/ALSA/ATA, computed from the bulk datasets, not the API)
+plus the trophy / co-occurrence / synergy signals — reproducing
+`analysis.context_advisor` exactly. See `docs/06-overwolf-overlay-plan.md`.
+
+## 6. Refresh data + build the distribution manifest
+
+```bash
+python3 -m analysis.sync --sets SOS BLB        # rebuild only if S3 data changed
+python3 -m analysis.sync --refresh-existing    # re-check every set with a bundle
+python3 -m analysis.sync --manifest-only       # rebuild manifest.json only (no network)
+python3 -m analysis.sync --sets SOS --force    # rebuild regardless
+```
+
+Before rebuilding a set, `sync` issues a cheap HEAD for its S3 dataset and only
+runs the pipeline when `Last-Modified` advanced past what we last built from — so
+frozen sets are never recomputed. It writes `web/data/manifest.json`
+(sha256/bytes/source_last_modified/state per set), which the client diffs to
+download only changed bundles. See `docs/07-data-distribution-plan.md`.
 
 ## Directory layout
 
