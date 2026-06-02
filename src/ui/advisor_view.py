@@ -157,6 +157,18 @@ class AdvisorPanel(tb.Frame):
                 tag_strings = [TAG_VISUALS.get(t, t.capitalize()) for t in rec.tags]
                 reason_text += f"\n{', '.join(tag_strings)}"
 
+            # Context layer: trophy / pool signals (shown only when artifacts exist)
+            context_parts = []
+            if rec.pool_synergy_delta and rec.pool_synergy_delta > 0.01:
+                context_parts.append(f"Syn +{rec.pool_synergy_delta*100:.1f}%WR")
+            if rec.pool_lift and rec.pool_lift > 1.1:
+                context_parts.append(f"Lift {rec.pool_lift:.1f}×")
+            if rec.trophy_rate_delta and abs(rec.trophy_rate_delta) >= 0.02:
+                sign = "+" if rec.trophy_rate_delta > 0 else ""
+                context_parts.append(f"Trophy {sign}{rec.trophy_rate_delta*100:.1f}%")
+            if context_parts:
+                reason_text += f"\n◈ {' · '.join(context_parts)}"
+
             lbl_reason = tb.Label(
                 content_frame,
                 text=reason_text,

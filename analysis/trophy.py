@@ -12,7 +12,10 @@ Output schema (written to data/artifacts/<SET>.<FORMAT>.trophy_pick_stats.parque
   pick_rate_delta, ata_delta
 """
 
+import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 import duckdb
@@ -115,10 +118,16 @@ def compute(
             ),
         })
 
-    tmp = duckdb.connect()
-    tmp.execute("CREATE TABLE trophy_stats AS SELECT * FROM rows")
-    tmp.execute(f"COPY trophy_stats TO '{out}' (FORMAT PARQUET)")
-    tmp.close()
+    fd, tmpjson = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(rows, f)
+        tmp = duckdb.connect()
+        tmp.execute(f"CREATE TABLE trophy_stats AS SELECT * FROM read_json_auto('{tmpjson}')")
+        tmp.execute(f"COPY trophy_stats TO '{out}' (FORMAT PARQUET)")
+        tmp.close()
+    finally:
+        os.unlink(tmpjson)
 
     logger.info("Wrote trophy pick stats: %s (%d cards)", out.name, len(rows))
     return out

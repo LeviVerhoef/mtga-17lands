@@ -13,7 +13,10 @@ Output (data/artifacts/<SET>.<FORMAT>.cooccurrence.parquet):
   (rows only where both p_y_given_x and lift meet minimums)
 """
 
+import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 import duckdb
@@ -146,10 +149,16 @@ def compute(
                 "pool_count": pool_count,
             })
 
-    tmp = duckdb.connect()
-    tmp.execute("CREATE TABLE cooc AS SELECT * FROM rows")
-    tmp.execute(f"COPY cooc TO '{out}' (FORMAT PARQUET)")
-    tmp.close()
+    fd, tmpjson = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(rows, f)
+        tmp = duckdb.connect()
+        tmp.execute(f"CREATE TABLE cooc AS SELECT * FROM read_json_auto('{tmpjson}')")
+        tmp.execute(f"COPY cooc TO '{out}' (FORMAT PARQUET)")
+        tmp.close()
+    finally:
+        os.unlink(tmpjson)
 
     logger.info("Co-occurrence: %d pairs (lift>%.1f, support>%d) -> %s", len(rows), _MIN_LIFT, _MIN_SUPPORT, out.name)
     return out

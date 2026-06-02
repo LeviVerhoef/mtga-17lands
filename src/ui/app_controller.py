@@ -15,6 +15,7 @@ from src import constants
 from src.configuration import write_configuration
 from src.advisor.engine import DraftAdvisor
 from src.signals import SignalCalculator
+from analysis.context_advisor import get_advisor as get_context_advisor
 from src.card_logic import filter_options, get_deck_metrics
 from src.app_update import AppUpdate
 
@@ -224,6 +225,16 @@ class AppController:
         # Pass signals securely into Advisor
         advisor = DraftAdvisor(metrics, taken_cards, signals=scores)
         recommendations = advisor.evaluate_pack(pack_cards, pi, current_pack=pk)
+
+        # Layer in contextual analysis (trophy delta, pool lift, synergy).
+        # Degrades gracefully to no-op when artifacts haven't been generated yet.
+        if es and et and recommendations:
+            try:
+                pool_names = [c.get("name", "") for c in taken_cards if c.get("name")]
+                ctx = get_context_advisor(es, et)
+                recommendations = ctx.annotate(recommendations, pool_names)
+            except Exception:
+                logger.debug("Context advisor failed; continuing without context", exc_info=True)
 
         # UPDATE UI STATE
         if pk > 0:

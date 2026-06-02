@@ -19,3 +19,8 @@ class Recommendation(BaseModel):
     is_elite: bool = False
     archetype_fit: str = "Neutral"
     tags: List[str] = []
+    # Context layer fields — populated by analysis.context_advisor when artifacts exist
+    trophy_rate_delta: Optional[float] = None   # pick_rate delta vs all-decks baseline
+    trophy_ata_delta: Optional[float] = None    # ATA delta (negative = taken earlier in trophy)
+    pool_lift: Optional[float] = None           # avg co-occurrence lift with pool cards
+    pool_synergy_delta: Optional[float] = None  # total win-rate uplift with pool cards
