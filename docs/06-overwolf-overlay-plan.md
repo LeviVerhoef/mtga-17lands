@@ -27,6 +27,25 @@
   a compact JSON export of those artifacts. This protects the most valuable work
   from the platform change (plan §12).
 
+### 1.1 Why Overwolf (validated 2026-06-02)
+
+We explicitly questioned whether Overwolf is needed, since the v1 *panel* is just
+an always-on-top window — which the existing Python/Tk app already does over
+**windowed/borderless** Arena, no Overwolf required. The conclusion: Overwolf is
+justified by the owner's actual requirements, not by the panel itself.
+
+| Requirement | Always-on-top window | Overwolf |
+|---|---|---|
+| Panel visible over windowed Arena | yes | yes |
+| Overlay **exclusive-fullscreen** Arena | no | yes |
+| Distribution + auto-update + built-in audience | no (raw installer) | yes (store) |
+| Built-in monetization (ads/subs) | no | yes (~70% rev share) |
+
+Owner wants all of the above and accepts **Windows-only** for the live overlay,
+so the cross-platform objection is moot (the Python/Tk app remains the Mac/dev
+build). Monetization must respect WotC FCP (plan §11): ads/cosmetics/personal-
+stats only — never paywall the card data or in-draft recommendations.
+
 ## 2. Why not a literal per-card overlay (the constraint)
 
 The Arena `Player.log` gives card **identity and pick order**, never pixel
