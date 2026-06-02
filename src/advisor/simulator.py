@@ -1,7 +1,15 @@
 import numpy as np
-from numba import njit
 import re
 from src.card_logic import get_functional_cmc
+
+try:
+    from numba import njit
+except ImportError:  # numba is optional — pure-numpy fallback is ~5× slower but correct
+    def njit(*args, **kwargs):
+        """No-op decorator used when numba is not installed."""
+        def decorator(fn):
+            return fn
+        return decorator if args and callable(args[0]) else decorator
 
 # Mana Bitmask Mapping
 COLOR_BITS = {"W": 1, "U": 2, "B": 4, "R": 8, "G": 16}
