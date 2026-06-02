@@ -6,26 +6,28 @@ Computes trophy-conditioned pick statistics.
 
 Trophy = 7 match wins (event_match_wins == 7) in Premier/Traditional Draft.
 
-Output schema (written to data/artifacts/<SET>.<FORMAT>.trophy_pick_stats.parquet):
-  card_name, color_pair, pick_rate, ata, seen_count,
-  pick_rate_all, ata_all, seen_count_all,
+Output schema (data/artifacts/<SET>.<FORMAT>.trophy_pick_stats.parquet):
+  card_name, color_pair,
+  seen_all, pick_rate_all, ata_all,
+  seen_trophy, pick_rate_trophy, ata_trophy,
   pick_rate_delta, ata_delta
+
+Computed in two set-based SQL passes (taken/ATA by GROUP BY pick; seen counts
+by UNPIVOT of the pack_card_* columns) rather than one query per card, which
+on a full set would be ~550 full-table scans over millions of rows. The
+set-based form also sidesteps per-card-name string interpolation, which is how
+the previous version mis-escaped card names containing apostrophes.
 """
 
-import json
 import logging
-import os
-import tempfile
 from pathlib import Path
-
-import duckdb
 
 from analysis.ingest import DatasetIngestor
 
 logger = logging.getLogger(__name__)
 
 _ARTIFACTS = Path(__file__).parent.parent / "data" / "artifacts"
-_MIN_SEEN = 50  # minimum seen_count to include a row
+_MIN_SEEN = 50  # minimum seen_all to include a row
 
 
 def compute(
@@ -45,89 +47,75 @@ def compute(
     tname = ing.load_into_db(expansion, event_type, "draft_data")
     con = ing.connection(expansion, event_type)
 
-    # Identify pack_card_* columns (one per card in the set)
-    cols = [
-        row[0]
-        for row in con.execute(f"DESCRIBE \"{tname}\"").fetchall()
-    ]
+    cols = [row[0] for row in con.execute(f'DESCRIBE "{tname}"').fetchall()]
     pack_cols = [c for c in cols if c.startswith("pack_card_")]
     if not pack_cols:
         raise ValueError(
             f"No pack_card_* columns found in {tname}. "
             "Verify the dataset schema with ingest.dump_headers()."
         )
+    pack_col_list = ", ".join(f'"{c}"' for c in pack_cols)
+    pack_prefix = len("pack_card_")
 
-    # Build per-card stats for all decks and trophy decks
-    # We'll do this in one SQL pass per subset to keep memory low.
-    results = []
-    for subset, filter_sql in [
-        ("all", "1=1"),
-        ("trophy", "event_match_wins = 7"),
-    ]:
-        card_stats = {}
-        for col in pack_cols:
-            card_name = col[len("pick_card_"):]  # strip prefix for display
-            # pack_card_<Name> = 1 when the card was in the pack (seen)
-            # pick = card_name when the card was picked
-            safe_col = col.replace("'", "''")
-            safe_name = col[len("pack_card_"):].replace("'", "''")
-            row = con.execute(f"""
-                SELECT
-                    SUM(CASE WHEN "{safe_col}" > 0 THEN 1 ELSE 0 END) AS seen,
-                    SUM(CASE WHEN pick = '{safe_name}' THEN 1 ELSE 0 END) AS taken,
-                    AVG(CASE WHEN pick = '{safe_name}' THEN pack_number * 15 + pick_number ELSE NULL END) AS ata
-                FROM "{tname}"
-                WHERE {filter_sql}
-            """).fetchone()
-            seen, taken, ata = row
-            if seen and seen >= min_seen:
-                card_stats[safe_name] = {
-                    "seen": seen,
-                    "taken": taken or 0,
-                    "pick_rate": (taken or 0) / seen,
-                    "ata": ata,
-                }
-        results.append((subset, card_stats))
+    # Pass 1: taken count + average-taken-at (ATA) per picked card, overall and
+    # within trophy drafts. seq = global pick index (pack*15 + pick).
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _taken AS
+        SELECT
+            pick AS card_name,
+            COUNT(*)                                   AS taken_all,
+            AVG(seq)                                   AS ata_all,
+            COUNT(*) FILTER (WHERE wins = 7)           AS taken_trophy,
+            AVG(seq) FILTER (WHERE wins = 7)           AS ata_trophy
+        FROM (
+            SELECT pick, event_match_wins AS wins,
+                   (pack_number * 15 + pick_number) AS seq
+            FROM "{tname}"
+        )
+        GROUP BY pick
+    """)
 
-    all_stats = dict(results[0][1])
-    trophy_stats = dict(results[1][1])
+    # Pass 2: seen count per card (pack_card_<X> > 0), overall and trophy.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _seen AS
+        SELECT
+            substr(name, {pack_prefix + 1}) AS card_name,
+            COUNT(*)                         AS seen_all,
+            COUNT(*) FILTER (WHERE wins = 7) AS seen_trophy
+        FROM (
+            UNPIVOT (SELECT event_match_wins AS wins, {pack_col_list} FROM "{tname}")
+            ON {pack_col_list}
+            INTO NAME name VALUE cnt
+        )
+        WHERE cnt > 0
+        GROUP BY substr(name, {pack_prefix + 1})
+    """)
 
-    rows = []
-    all_cards = set(all_stats) | set(trophy_stats)
-    for card in all_cards:
-        a = all_stats.get(card, {})
-        t = trophy_stats.get(card, {})
-        rows.append({
-            "card_name": card,
-            "color_pair": "All",
-            "seen_all": a.get("seen", 0),
-            "pick_rate_all": a.get("pick_rate"),
-            "ata_all": a.get("ata"),
-            "seen_trophy": t.get("seen", 0),
-            "pick_rate_trophy": t.get("pick_rate"),
-            "ata_trophy": t.get("ata"),
-            "pick_rate_delta": (
-                (t["pick_rate"] - a["pick_rate"])
-                if t.get("pick_rate") is not None and a.get("pick_rate") is not None
-                else None
-            ),
-            "ata_delta": (
-                (t["ata"] - a["ata"])
-                if t.get("ata") is not None and a.get("ata") is not None
-                else None
-            ),
-        })
+    # Join and derive rates + trophy-vs-overall deltas.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _trophy AS
+        SELECT
+            s.card_name,
+            'All' AS color_pair,
+            s.seen_all,
+            t.taken_all::DOUBLE / s.seen_all AS pick_rate_all,
+            t.ata_all,
+            s.seen_trophy,
+            CASE WHEN s.seen_trophy > 0
+                 THEN t.taken_trophy::DOUBLE / s.seen_trophy END AS pick_rate_trophy,
+            t.ata_trophy,
+            CASE WHEN s.seen_trophy > 0
+                 THEN t.taken_trophy::DOUBLE / s.seen_trophy
+                      - t.taken_all::DOUBLE / s.seen_all END AS pick_rate_delta,
+            CASE WHEN t.ata_trophy IS NOT NULL AND t.ata_all IS NOT NULL
+                 THEN t.ata_trophy - t.ata_all END AS ata_delta
+        FROM _seen s
+        JOIN _taken t ON t.card_name = s.card_name
+        WHERE s.seen_all >= {min_seen}
+    """)
 
-    fd, tmpjson = tempfile.mkstemp(suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(rows, f)
-        tmp = duckdb.connect()
-        tmp.execute(f"CREATE TABLE trophy_stats AS SELECT * FROM read_json_auto('{tmpjson}')")
-        tmp.execute(f"COPY trophy_stats TO '{out}' (FORMAT PARQUET)")
-        tmp.close()
-    finally:
-        os.unlink(tmpjson)
+    n = con.execute("SELECT COUNT(*) FROM _trophy").fetchone()[0]
+    con.execute(f"COPY (SELECT * FROM _trophy) TO '{out}' (FORMAT PARQUET)")
 
-    logger.info("Wrote trophy pick stats: %s (%d cards)", out.name, len(rows))
+    logger.info("Wrote trophy pick stats: %s (%d cards)", out.name, n)
     return out

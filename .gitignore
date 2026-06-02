@@ -193,6 +193,11 @@ data/bulk/
 data/duckdb/
 data/scryfall_identity.json
 
-# Keep artifacts (precomputed parquet/model files) tracked
+# Keep small, directly-consumed artifacts (trophy/cooccurrence/synergy + manifest)
+# tracked so the overlay's context layer works out of the box for sample sets.
 !data/artifacts/
 !data/.gitkeep
+# ...but the similar-pools k-NN indexes are large (10s of MB/set) and regenerable
+# via `python -m analysis.export`, so keep them out of git.
+data/artifacts/*.pool_vectors.*.parquet
+data/artifacts/*.pool_picks.*.parquet

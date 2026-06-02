@@ -90,8 +90,27 @@ class DatasetIngestor:
         if key not in self._connections:
             db = _db_path(expansion, event_type)
             db.parent.mkdir(parents=True, exist_ok=True)
-            self._connections[key] = duckdb.connect(str(db))
+            con = duckdb.connect(str(db))
+            self._tune(con)
+            self._connections[key] = con
         return self._connections[key]
+
+    @staticmethod
+    def _tune(con: duckdb.DuckDBPyConnection) -> None:
+        """
+        Bound memory and allow on-disk spilling so the large set-based
+        aggregations (co-occurrence / synergy self-joins over millions of
+        rows) complete on a laptop instead of OOM-ing.
+        """
+        spill = _DATA_DIR / "duckdb" / "tmp"
+        spill.mkdir(parents=True, exist_ok=True)
+        mem = os.environ.get("MTGA_DUCKDB_MEMORY_LIMIT", "6GB")
+        try:
+            con.execute(f"SET memory_limit='{mem}'")
+            con.execute(f"SET temp_directory='{spill}'")
+            con.execute("SET preserve_insertion_order=false")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("DuckDB tuning skipped: %s", exc)
 
     def load_into_db(
         self,

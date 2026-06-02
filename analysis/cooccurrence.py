@@ -8,18 +8,20 @@ For each card X in trophy (and all) pools:
   P(pool contains Y | pool contains X)
   lift = P(Y|X) / P(Y)
 
-Output (data/artifacts/<SET>.<FORMAT>.cooccurrence.parquet):
+Output (data/artifacts/<SET>.<FORMAT>.cooccurrence.<suffix>.parquet):
   card_x, card_y, co_count, p_y_given_x, p_y, lift, pool_count
-  (rows only where both p_y_given_x and lift meet minimums)
+  (rows only where co_count >= _MIN_SUPPORT and lift >= _MIN_LIFT)
+
+Implementation note: this runs as a small number of set-based SQL passes
+(UNPIVOT each pool into a long present(draft_id, card) table, then a single
+self-join + GROUP BY to count all pairs at once) rather than one query per
+card pair. On a full set (~150k pools, 276 cards) the per-pair approach would
+issue ~76k full-table scans and never finish; the set-based version is a few
+passes over a 7M-row long table.
 """
 
-import json
 import logging
-import os
-import tempfile
 from pathlib import Path
-
-import duckdb
 
 from analysis.ingest import DatasetIngestor
 
@@ -35,6 +37,8 @@ def compute(
     event_type: str,
     trophy_only: bool = False,
     ingestor: DatasetIngestor | None = None,
+    min_support: int = _MIN_SUPPORT,
+    min_lift: float = _MIN_LIFT,
 ) -> Path:
     """Compute and save co-occurrence parquet. Returns output path."""
     _ARTIFACTS.mkdir(parents=True, exist_ok=True)
@@ -51,114 +55,80 @@ def compute(
         raise ValueError(f"No pool_* columns in {tname}.")
 
     where = "WHERE event_match_wins = 7" if trophy_only else ""
+    pool_col_list = ", ".join(f'"{c}"' for c in pool_cols)
+    prefix_len = len("pool_")
 
-    # Build a per-draft-id final pool snapshot.
-    # draft_data has one row per pick; we want the state at the last pick of
-    # each draft (max pick_number within each draft_id = the final pool row).
-    # pool_<Name> columns represent cumulative pool size up to that pick.
-    pool_col_sql = ", ".join(f'"{c}"' for c in pool_cols)
-
-    # Get total pool count first
-    pool_count = con.execute(f"""
-        SELECT COUNT(DISTINCT draft_id)
-        FROM "{tname}"
-        {where}
-    """).fetchone()[0]
-
-    logger.info(
-        "Computing co-occurrence over %d drafts (%s)...", pool_count, suffix
-    )
-
-    # For efficiency, compute using DuckDB SQL directly over the bulk table.
-    # We'll write the co-occurrence pairs to a temp parquet, then filter.
-    card_names = [c[len("pool_"):] for c in pool_cols]
-
-    # Marginal probabilities: P(card in final pool)
-    # Use last-pick rows per draft
-    marginals_sql = f"""
+    # 1. Final pool per draft = the last-pick row (max pack*15 + pick).
+    #    Keep only draft_id + the pool_* columns to stay lean.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _final_pools AS
         WITH last_picks AS (
             SELECT draft_id, MAX(pick_number + pack_number * 15) AS last_seq
             FROM "{tname}"
             {where}
             GROUP BY draft_id
-        ),
-        final_pools AS (
-            SELECT t.*
-            FROM "{tname}" t
-            JOIN last_picks lp
-              ON t.draft_id = lp.draft_id
-             AND (t.pick_number + t.pack_number * 15) = lp.last_seq
-            {where.replace("WHERE", "AND") if where else ""}
         )
+        SELECT t.draft_id, {pool_col_list}
+        FROM "{tname}" t
+        JOIN last_picks lp
+          ON t.draft_id = lp.draft_id
+         AND (t.pick_number + t.pack_number * 15) = lp.last_seq
+    """)
+
+    pool_count = con.execute("SELECT COUNT(DISTINCT draft_id) FROM _final_pools").fetchone()[0]
+    if not pool_count:
+        logger.warning("No pools for %s.%s (%s) — empty artifact", expansion, event_type, suffix)
+        con.execute("CREATE OR REPLACE TEMP TABLE _cooc AS SELECT NULL AS card_x WHERE 1=0")
+        con.execute(f"COPY (SELECT * FROM _cooc) TO '{out}' (FORMAT PARQUET)")
+        return out
+
+    logger.info("Computing co-occurrence over %d pools (%s)...", pool_count, suffix)
+
+    # 2. Long form: one row per (draft_id, card) the pool contains.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _present AS
+        SELECT draft_id, substr(name, {prefix_len + 1}) AS card
+        FROM (
+            UNPIVOT _final_pools
+            ON {pool_col_list}
+            INTO NAME name VALUE cnt
+        )
+        WHERE cnt > 0
+    """)
+
+    # 3. Per-card marginal counts (how many pools contain each card).
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE _marg AS
+        SELECT card, COUNT(*) AS n FROM _present GROUP BY card
+    """)
+
+    # 4. All co-occurring pairs in one self-join + aggregate, then derive
+    #    lift = co * pool_count / (n_x * n_y). Filter on support and lift.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _cooc AS
         SELECT
-            {", ".join(f'SUM(CASE WHEN "{c}" > 0 THEN 1 ELSE 0 END)::DOUBLE / COUNT(*) AS p_{i}' for i, c in enumerate(pool_cols))}
-        FROM final_pools
-    """
+            a.card AS card_x,
+            b.card AS card_y,
+            COUNT(*) AS co_count,
+            COUNT(*)::DOUBLE / mx.n          AS p_y_given_x,
+            my.n::DOUBLE / {pool_count}      AS p_y,
+            (COUNT(*)::DOUBLE * {pool_count}) / (mx.n * my.n) AS lift,
+            {pool_count} AS pool_count
+        FROM _present a
+        JOIN _present b
+          ON a.draft_id = b.draft_id AND a.card <> b.card
+        JOIN _marg mx ON mx.card = a.card
+        JOIN _marg my ON my.card = b.card
+        GROUP BY a.card, b.card, mx.n, my.n
+        HAVING COUNT(*) >= {min_support}
+           AND (COUNT(*)::DOUBLE * {pool_count}) / (mx.n * my.n) >= {min_lift}
+    """)
 
-    marginals_row = con.execute(marginals_sql).fetchone()
-    marginals = {card_names[i]: marginals_row[i] for i in range(len(card_names))}
+    n_pairs = con.execute("SELECT COUNT(*) FROM _cooc").fetchone()[0]
+    con.execute(f"COPY (SELECT * FROM _cooc) TO '{out}' (FORMAT PARQUET)")
 
-    rows = []
-    for i, cx in enumerate(card_names):
-        p_x = marginals[cx]
-        if p_x == 0:
-            continue
-        col_x = pool_cols[i]
-
-        for j, cy in enumerate(card_names):
-            if i == j:
-                continue
-            p_y = marginals[cy]
-            if p_y == 0:
-                continue
-            col_y = pool_cols[j]
-
-            co_sql = f"""
-                WITH last_picks AS (
-                    SELECT draft_id, MAX(pick_number + pack_number * 15) AS last_seq
-                    FROM "{tname}"
-                    {where}
-                    GROUP BY draft_id
-                ),
-                final_pools AS (
-                    SELECT t.*
-                    FROM "{tname}" t
-                    JOIN last_picks lp
-                      ON t.draft_id = lp.draft_id
-                     AND (t.pick_number + t.pack_number * 15) = lp.last_seq
-                    {where.replace("WHERE", "AND") if where else ""}
-                )
-                SELECT
-                    SUM(CASE WHEN "{col_x}" > 0 AND "{col_y}" > 0 THEN 1 ELSE 0 END) AS co
-                FROM final_pools
-            """
-            co_count = con.execute(co_sql).fetchone()[0] or 0
-            if co_count < _MIN_SUPPORT:
-                continue
-            p_y_given_x = co_count / (p_x * pool_count) if p_x * pool_count > 0 else 0
-            lift = p_y_given_x / p_y if p_y > 0 else 0
-            if lift < _MIN_LIFT:
-                continue
-            rows.append({
-                "card_x": cx,
-                "card_y": cy,
-                "co_count": co_count,
-                "p_y_given_x": p_y_given_x,
-                "p_y": p_y,
-                "lift": lift,
-                "pool_count": pool_count,
-            })
-
-    fd, tmpjson = tempfile.mkstemp(suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(rows, f)
-        tmp = duckdb.connect()
-        tmp.execute(f"CREATE TABLE cooc AS SELECT * FROM read_json_auto('{tmpjson}')")
-        tmp.execute(f"COPY cooc TO '{out}' (FORMAT PARQUET)")
-        tmp.close()
-    finally:
-        os.unlink(tmpjson)
-
-    logger.info("Co-occurrence: %d pairs (lift>%.1f, support>%d) -> %s", len(rows), _MIN_LIFT, _MIN_SUPPORT, out.name)
+    logger.info(
+        "Co-occurrence: %d pairs (lift>=%.1f, support>=%d) -> %s",
+        n_pairs, min_lift, min_support, out.name,
+    )
     return out

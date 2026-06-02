@@ -12,16 +12,17 @@ For each pair (X, Y):
 
 Output (data/artifacts/<SET>.<FORMAT>.synergy.parquet):
   card_x, card_y, wr_with, wr_without, delta, n
-  (only rows where n >= min_games and |delta| is meaningful)
+  (only rows where n >= min_games and |delta| >= min_delta)
+
+Implementation note: computed as a few set-based SQL passes. Each game's deck
+is UNPIVOTed into a long present(game_id, card, won) table; a single self-join
+counts wins for every co-occurring pair at once. The "without" stats are derived
+by subtracting the pair counts from each card's overall totals, so we never scan
+the table per pair. The naive per-pair version would issue ~76k full-table scans.
 """
 
-import json
 import logging
-import os
-import tempfile
 from pathlib import Path
-
-import duckdb
 
 from analysis.ingest import DatasetIngestor
 
@@ -30,6 +31,14 @@ logger = logging.getLogger(__name__)
 _ARTIFACTS = Path(__file__).parent.parent / "data" / "artifacts"
 _MIN_GAMES = 100
 _MIN_DELTA = 0.02   # only store pairs with >= 2% win-rate difference
+
+# Basic lands appear in nearly every matching deck, so the "without" complement
+# is tiny and degenerate — they are noise as synergy partners, not signal.
+_BASICS = (
+    "Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes",
+    "Snow-Covered Plains", "Snow-Covered Island", "Snow-Covered Swamp",
+    "Snow-Covered Mountain", "Snow-Covered Forest",
+)
 
 
 def compute(
@@ -52,67 +61,77 @@ def compute(
     if not deck_cols:
         raise ValueError(f"No deck_* columns in {tname}. Verify game_data schema.")
 
-    card_names = [c[len("deck_"):] for c in deck_cols]
-    logger.info("Computing synergy for %d cards in %s.%s...", len(card_names), expansion, event_type)
+    deck_col_list = ", ".join(f'"{c}"' for c in deck_cols)
+    prefix_len = len("deck_")
+    logger.info("Computing synergy for %d cards in %s.%s...", len(deck_cols), expansion, event_type)
 
-    rows = []
-    for i, cx in enumerate(card_names):
-        col_x = deck_cols[i]
+    # 1. One row per game with a stable id + won flag + deck columns.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _games AS
+        SELECT ROW_NUMBER() OVER () AS game_id, CAST(won AS INT) AS won, {deck_col_list}
+        FROM "{tname}"
+    """)
 
-        # Baseline: win rate of decks containing X
-        baseline = con.execute(f"""
-            SELECT AVG(CAST(won AS INT))::DOUBLE, COUNT(*)
-            FROM "{tname}"
-            WHERE "{col_x}" > 0
-        """).fetchone()
-        wr_x_baseline, n_x = baseline
-        if not n_x or n_x < min_games:
-            continue
+    # 2. Long form: one row per (game, card-in-deck), carrying the win flag.
+    #    Basic lands are dropped — they are in almost every deck and only add noise.
+    basics_list = ", ".join(f"'{b}'" for b in _BASICS)
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _present AS
+        SELECT game_id, won, substr(name, {prefix_len + 1}) AS card
+        FROM (
+            UNPIVOT _games
+            ON {deck_col_list}
+            INTO NAME name VALUE cnt
+        )
+        WHERE cnt > 0
+          AND substr(name, {prefix_len + 1}) NOT IN ({basics_list})
+    """)
 
-        for j, cy in enumerate(card_names):
-            if i == j:
-                continue
-            col_y = deck_cols[j]
+    # 3. Per-card totals: games containing the card and wins among them.
+    con.execute("""
+        CREATE OR REPLACE TEMP TABLE _cardstats AS
+        SELECT card, COUNT(*) AS n_x, SUM(won) AS wins_x
+        FROM _present GROUP BY card
+    """)
 
-            res = con.execute(f"""
-                SELECT
-                    AVG(CASE WHEN "{col_y}" > 0 THEN CAST(won AS INT) ELSE NULL END)::DOUBLE AS wr_with,
-                    SUM(CASE WHEN "{col_y}" > 0 THEN 1 ELSE 0 END) AS n_with,
-                    AVG(CASE WHEN "{col_y}" = 0 THEN CAST(won AS INT) ELSE NULL END)::DOUBLE AS wr_without,
-                    SUM(CASE WHEN "{col_y}" = 0 THEN 1 ELSE 0 END) AS n_without
-                FROM "{tname}"
-                WHERE "{col_x}" > 0
-            """).fetchone()
+    # 4. Every co-occurring pair's "with" stats in one self-join.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _pairs AS
+        SELECT a.card AS cx, b.card AS cy,
+               COUNT(*) AS n_with, SUM(a.won) AS wins_with
+        FROM _present a
+        JOIN _present b ON a.game_id = b.game_id AND a.card <> b.card
+        GROUP BY a.card, b.card
+        HAVING COUNT(*) >= {min_games}
+    """)
 
-            wr_with, n_with, wr_without, n_without = res
-            if not n_with or n_with < min_games:
-                continue
-            if wr_with is None or wr_without is None:
-                continue
+    # 5. Derive "without" stats by subtraction; keep meaningful deltas.
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _synergy AS
+        SELECT card_x, card_y, wr_with, wr_without, (wr_with - wr_without) AS delta, n
+        FROM (
+            SELECT
+                p.cx AS card_x,
+                p.cy AS card_y,
+                p.wins_with::DOUBLE / p.n_with AS wr_with,
+                CASE WHEN (cs.n_x - p.n_with) > 0
+                     THEN (cs.wins_x - p.wins_with)::DOUBLE / (cs.n_x - p.n_with)
+                END AS wr_without,
+                p.n_with AS n
+            FROM _pairs p
+            JOIN _cardstats cs ON cs.card = p.cx
+            WHERE cs.n_x >= {min_games}
+              AND (cs.n_x - p.n_with) >= {min_games}  -- trustworthy "without" sample
+        )
+        WHERE wr_without IS NOT NULL
+          AND abs(wr_with - wr_without) >= {min_delta}
+    """)
 
-            delta = wr_with - wr_without
-            if abs(delta) < min_delta:
-                continue
+    n_pairs = con.execute("SELECT COUNT(*) FROM _synergy").fetchone()[0]
+    con.execute(f"COPY (SELECT * FROM _synergy) TO '{out}' (FORMAT PARQUET)")
 
-            rows.append({
-                "card_x": cx,
-                "card_y": cy,
-                "wr_with": wr_with,
-                "wr_without": wr_without,
-                "delta": delta,
-                "n": int(n_with),
-            })
-
-    fd, tmpjson = tempfile.mkstemp(suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(rows, f)
-        tmp = duckdb.connect()
-        tmp.execute(f"CREATE TABLE synergy AS SELECT * FROM read_json_auto('{tmpjson}')")
-        tmp.execute(f"COPY synergy TO '{out}' (FORMAT PARQUET)")
-        tmp.close()
-    finally:
-        os.unlink(tmpjson)
-
-    logger.info("Synergy: %d pairs (|delta|>=%.2f, n>=%d) -> %s", len(rows), min_delta, min_games, out.name)
+    logger.info(
+        "Synergy: %d pairs (|delta|>=%.2f, n>=%d) -> %s",
+        n_pairs, min_delta, min_games, out.name,
+    )
     return out

@@ -1,0 +1,23 @@
+{
+  "expansion": "BLB",
+  "event_type": "PremierDraft",
+  "generated_at": "2026-06-02T02:58:00.455817+00:00",
+  "artifacts": {
+    "draft_data": "ok",
+    "game_data": "ok",
+    "trophy_pick_stats": "/Users/levi/projects/mtga-17lands/data/artifacts/BLB.PremierDraft.trophy_pick_stats.parquet",
+    "cooccurrence_trophy": "/Users/levi/projects/mtga-17lands/data/artifacts/BLB.PremierDraft.cooccurrence.trophy.parquet",
+    "cooccurrence_all": "/Users/levi/projects/mtga-17lands/data/artifacts/BLB.PremierDraft.cooccurrence.all.parquet",
+    "synergy": "/Users/levi/projects/mtga-17lands/data/artifacts/BLB.PremierDraft.synergy.parquet",
+    "similar_pools_trophy": {
+      "vectors": "/Users/levi/projects/mtga-17lands/data/artifacts/BLB.PremierDraft.pool_vectors.trophy.parquet",
+      "picks": "/Users/levi/projects/mtga-17lands/data/artifacts/BLB.PremierDraft.pool_picks.trophy.parquet"
+    },
+    "similar_pools_all": {
+      "vectors": "/Users/levi/projects/mtga-17lands/data/artifacts/BLB.PremierDraft.pool_vectors.all.parquet",
+      "picks": "/Users/levi/projects/mtga-17lands/data/artifacts/BLB.PremierDraft.pool_picks.all.parquet"
+    }
+  },
+  "errors": {},
+  "elapsed_seconds": 228.8
+}

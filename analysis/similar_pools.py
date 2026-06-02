@@ -25,8 +25,9 @@ from analysis.ingest import DatasetIngestor
 logger = logging.getLogger(__name__)
 
 _ARTIFACTS = Path(__file__).parent.parent / "data" / "artifacts"
-_MIN_SAMPLES = 500   # minimum pools to index before recommending
-_TOP_K = 50          # neighbors to aggregate over
+_MIN_SAMPLES = 500       # minimum pools to index before recommending
+_TOP_K = 50              # neighbors to aggregate over
+_MAX_PICK_ROWS = 200_000  # cap indexed pick states so artifacts stay compact
 
 
 def build(
@@ -34,10 +35,17 @@ def build(
     event_type: str,
     trophy_only: bool = False,
     ingestor: DatasetIngestor | None = None,
+    max_pick_rows: int = _MAX_PICK_ROWS,
 ) -> tuple[Path, Path]:
     """
     Build and persist pool vector index and pick tables.
     Returns (pool_vectors path, pool_picks path).
+
+    Both artifacts are produced with set-based SQL (UNPIVOT) rather than a
+    Python row loop — on a full set draft_data has ~6M pick rows, and the old
+    iterrows() approach exploded to 100M+ dict rows and OOM-ed. Pick states are
+    reservoir-sampled down to ``max_pick_rows`` so the parquet stays compact and
+    the k-NN matrix loads in memory at query time.
     """
     _ARTIFACTS.mkdir(parents=True, exist_ok=True)
     suffix = "trophy" if trophy_only else "all"
@@ -55,61 +63,63 @@ def build(
         raise ValueError(f"Missing pool_* or pack_card_* columns in {tname}.")
 
     where = "WHERE event_match_wins = 7" if trophy_only else ""
+    pool_col_list = ", ".join(f'"{c}"' for c in pool_cols)
+    pack_col_list = ", ".join(f'"{c}"' for c in pack_cols)
+    pool_prefix = len("pool_")
+    pack_prefix = len("pack_card_")
 
-    pool_col_sql = ", ".join(f'"{c}"' for c in pool_cols)
-    pack_col_sql = ", ".join(f'"{c}"' for c in pack_cols)
-
-    # Extract one row per pick with pool state + pack state + pick made
     logger.info("Extracting pool/pick rows from %s.%s (%s)...", expansion, event_type, suffix)
-    rows_df = con.execute(f"""
-        SELECT draft_id, pack_number, pick_number, pick,
-               {pool_col_sql},
-               {pack_col_sql}
+
+    # Only index picks where the drafter already has a pool to compare against
+    # (pick_number+pack>0). Reservoir-sample to keep the artifact bounded.
+    total = con.execute(f"""
+        SELECT COUNT(*) FROM "{tname}"
+        {where}{' AND' if where else 'WHERE'} (pack_number * 15 + pick_number) > 0
+    """).fetchone()[0]
+    sample_clause = f"USING SAMPLE {max_pick_rows} ROWS" if total > max_pick_rows else ""
+
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _picks AS
+        SELECT
+            draft_id || '_' || pack_number || '_' || pick_number AS pick_id,
+            draft_id, pack_number, pick_number, pick,
+            {pool_col_list}, {pack_col_list}
         FROM "{tname}"
-        {where}
-    """).df()
+        {where}{' AND' if where else 'WHERE'} (pack_number * 15 + pick_number) > 0
+        {sample_clause}
+    """)
 
-    if len(rows_df) < _MIN_SAMPLES:
-        logger.warning("Only %d rows — too few for reliable recommendations", len(rows_df))
+    if total < _MIN_SAMPLES:
+        logger.warning("Only %d pick rows — too few for reliable recommendations", total)
 
-    # Pool vectors: for each pick row, the pool_ columns form the vector
-    pool_vec_cols = pool_cols
-    card_names_pool = [c[len("pool_"):] for c in pool_vec_cols]
+    # pool_vectors (long): pick_id, card_name, count — one row per card in pool.
+    con.execute(f"""
+        COPY (
+            SELECT pick_id, substr(name, {pool_prefix + 1}) AS card_name, cnt AS count
+            FROM (UNPIVOT _picks ON {pool_col_list} INTO NAME name VALUE cnt)
+            WHERE cnt > 0
+        ) TO '{vec_out}' (FORMAT PARQUET)
+    """)
 
-    # Write pool_vectors (long format: draft_id + pick_seq + card + count)
-    tmp = duckdb.connect()
-    tmp.register("raw", rows_df)
-
-    # Build a unique pick_id
-    pool_vec_rows = []
-    for _, row in rows_df.iterrows():
-        pick_id = f"{row['draft_id']}_{row['pack_number']}_{row['pick_number']}"
-        for c, name in zip(pool_vec_cols, card_names_pool):
-            v = row.get(c, 0)
-            if v and v > 0:
-                pool_vec_rows.append({"pick_id": pick_id, "card_name": name, "count": int(v)})
-
-    tmp.execute("CREATE TABLE pool_vectors AS SELECT * FROM pool_vec_rows")
-    tmp.execute(f"COPY pool_vectors TO '{vec_out}' (FORMAT PARQUET)")
-
-    # Build pool_picks: pick_id, draft_id, pack, pick_num, card_picked, available cards
-    pick_rows = []
-    pack_card_names = [c[len("pack_card_"):] for c in pack_cols]
-    for _, row in rows_df.iterrows():
-        pick_id = f"{row['draft_id']}_{row['pack_number']}_{row['pick_number']}"
-        available = [name for c, name in zip(pack_cols, pack_card_names) if row.get(c, 0) > 0]
-        pick_rows.append({
-            "pick_id": pick_id,
-            "draft_id": row["draft_id"],
-            "pack_number": row["pack_number"],
-            "pick_number": row["pick_number"],
-            "card_picked": row["pick"],
-            "cards_available": available,
-        })
-
-    tmp.execute("CREATE TABLE pool_picks AS SELECT * FROM pick_rows")
-    tmp.execute(f"COPY pool_picks TO '{picks_out}' (FORMAT PARQUET)")
-    tmp.close()
+    # pool_picks: pick_id, draft_id, pack, pick, card_picked, cards_available[].
+    con.execute(f"""
+        COPY (
+            SELECT
+                pick_id,
+                any_value(draft_id) AS draft_id,
+                any_value(pack_number) AS pack_number,
+                any_value(pick_number) AS pick_number,
+                any_value(pick) AS card_picked,
+                list(card) AS cards_available
+            FROM (
+                SELECT pick_id, draft_id, pack_number, pick_number, pick,
+                       substr(name, {pack_prefix + 1}) AS card
+                FROM (UNPIVOT _picks ON {pack_col_list} INTO NAME name VALUE cnt)
+                WHERE cnt > 0
+            )
+            GROUP BY pick_id
+        ) TO '{picks_out}' (FORMAT PARQUET)
+    """)
 
     logger.info("Pool vectors: %s | Pool picks: %s", vec_out.name, picks_out.name)
     return vec_out, picks_out
