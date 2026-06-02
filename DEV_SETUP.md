@@ -57,7 +57,7 @@ than the generated fixture.
 python -m pytest tests/ -q
 ```
 
-Expected: **669 passed, 1 skipped** (as of June 2026, macOS and Windows).
+Expected: **685 passed, 1 skipped** (as of June 2026, macOS and Windows).
 
 ## 4. Run the offline analysis pipeline
 
@@ -107,7 +107,7 @@ src/           upstream overlay (log scanner, UI, 17Lands client, advisor)
 identity/      Scryfall grpId→name map + set-code overrides
 analysis/      offline analytics engine (trophy, co-occurrence, synergy, pools)
 data/          gitignored bulk data + DuckDB; tracked artifacts/
-tests/         669 unit tests; fixtures/ for real log/API snapshots
+tests/         685 unit tests; fixtures/ for real log/API snapshots
 test_logs/     gitignored; put Player_Old_Draft.log here for the simulator
 config.toml    all runtime configuration
 requirements.txt       pip install for both platforms
