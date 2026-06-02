@@ -32,10 +32,11 @@ Implications:
 | Stream | Source | Changes | Size/set | Who fetches |
 |---|---|---|---|---|
 | **Context** (trophy/cooc/synergy) | S3 bulk datasets | only while active, then frozen | ~0.3–0.9 MB JSON | us → CDN → client |
-| **Ratings** (GIHWR/ALSA/… win rates) | live `card_ratings` endpoint | daily-ish while active | ~0.25 MB JSON (all-colors) | us → CDN → client |
+| **Ratings** (GIHWR/ALSA/… win rates) | **same S3 bulk datasets** (computed, not the API — see §7) | same cadence as context | folded into the bundle | us → CDN → client |
 
-Card identity/images come from Scryfall and only change on a new set (handled by
-the existing identity layer).
+Both streams therefore come from the **bulk datasets** and share one refresh
+trigger. Card identity/images come from Scryfall and only change on a new set
+(handled by the existing identity layer).
 
 ## 3. Architecture
 
@@ -112,26 +113,35 @@ for offline dev defaults (we already have `web/data/{BLB,SOS}` for that).
 - Net: "all sets fully synced" with near-zero recurring compute — frozen sets are
   never rebuilt, active sets rebuild only on real change.
 
-## 7. Centralize the live ratings too (17Lands goodwill)
+## 7. Win rates: derive from the bulk datasets, not the API
 
-Today the Tk app hits the live `card_ratings` endpoint per user (cached daily).
-At scale that's thousands of users hammering 17Lands — against both their stated
-preference (they discourage third-party API use) and the goodwill the project
-depends on (plan §11).
+**Policy check (2026-06-02).** 17Lands' own guidance:
+- **Public bulk datasets — encouraged.** "Available to literally anyone," they
+  "definitely encourage anyone to try." Using them whenever we want is the
+  intended use.
+- **Live API (`card_ratings`) — discouraged.** "Strongly discourage scraping,"
+  "unsupported for external/third-party use," and they will "secure the API" on a
+  pattern of abuse; they steer third parties to the website aggregates or the
+  bulk datasets instead.
+(Sources: 17lands.com/usage_guidelines, /public_datasets, /faq.)
 
-**Recommendation:** our scheduled job fetches `card_ratings` **once per day per
-active set** and publishes a `ratings.json` snapshot to our CDN. Users then pull
-**everything from us**, never touching 17Lands directly. Benefits: 17Lands sees 1
-request/day from our CI instead of N from users; clients work offline; we control
-caching. Cost: keep only the latest snapshot per active set (~0.25 MB each).
-- v1: snapshot the all-colors view (what the panel needs first).
-- v2: add color-pair filters (`colors=WU…`) for the "Auto" color filter — a few
-  MB/active set/day; only if/when that feature lands.
+**Decision: compute the headline win-rate stats ourselves from the bulk datasets
+and drop the `card_ratings` API entirely.** We already ingest `game_data`
+(`opening_hand_<card>`, `drawn_<card>`, `won` → GIHWR/OHWR/GDWR) and `draft_data`
+(→ ALSA/ATA), so the full 17Lands metric suite is derivable from the *encouraged*
+data — no scraping, no re-hosting of their live product surface, no goodwill ask.
 
-> **ToS note (plan §11):** publishing *derived aggregates* of the public bulk
-> datasets is their intended use. Re-hosting `card_ratings` snapshots is more
-> sensitive (it's their live product surface) — message the 17Lands Discord about
-> intent before shipping the ratings mirror, and keep all of it free per FCP.
+- Add these per-card metrics to the context bundle (or a sibling `ratings.json`),
+  produced by the same pipeline that builds trophy/cooc/synergy.
+- Tradeoff vs. the live API: freshness lags by the bulk cadence (~weekly while a
+  set is active, then frozen). For Limited the numbers stabilize quickly; label
+  each bundle with its snapshot date and the source dataset's `Last-Modified`.
+- Color-pair filters (the "Auto" filter, plan §4) are also computable from
+  `game_data` (`main_colors`) — a later addition, still bulk-only.
+
+> Keep everything free (WotC FCP, plan §11) and **attribute 17Lands as the data
+> source** in the app — good practice and appreciated by them. No API mirror, so
+> no need to clear anything with them beyond normal courtesy attribution.
 
 ## 8. Build order
 
@@ -143,8 +153,9 @@ caching. Cost: keep only the latest snapshot per active set (~0.25 MB each).
    (Mac-doable now; this is the heart of the low-cost guarantee.)
 3. **Back-catalog one-time build** — run (2) over all available sets once.
 4. **GitHub Actions cron** — schedule (2)+(1) daily; publish deltas.
-5. **Ratings snapshotter** — daily `card_ratings` → `ratings.json` (after pinging
-   17Lands).
+5. **Win-rate metrics from bulk** — extend the pipeline to compute GIHWR/OHWR/
+   GDWR/ALSA/ATA per card from `game_data`/`draft_data` and fold them into the
+   bundle (no API). Same refresh trigger as context.
 6. **Client sync** — in the overlay app: fetch manifest, diff by sha256, download
    changed bundles; ship current sets pre-bundled for offline first-run.
 
