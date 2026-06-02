@@ -48,6 +48,10 @@ def artifacts(tmp_path):
         {"card_x": "Alpha", "card_y": "Beta", "delta": 0.06},
         {"card_x": "Alpha", "card_y": "Gamma", "delta": -0.09},
     ])
+    _write_parquet(art, "TST.PremierDraft.card_metrics.parquet", [
+        {"card_name": "Alpha", "gihwr": 0.601, "alsa": 4.25, "ata": 5.26,
+         "ohwr": 0.617, "gdwr": 0.592, "gpwr": 0.587, "gih_count": 45613},
+    ])
     return art
 
 
@@ -63,6 +67,17 @@ def test_export_writes_compact_bundle(artifacts, tmp_path):
     assert b["set"] == "TST" and b["format"] == "PremierDraft"
     # card index covers every referenced name (incl. Gamma which only appears as a partner)
     assert set(b["cards"]) == {"Alpha", "Beta", "Gamma", "Rare"}
+
+
+def test_metrics_section(artifacts, tmp_path):
+    out = tmp_path / "web"
+    export_web.export_web("TST", "PremierDraft", artifacts_dir=artifacts, out_dir=out)
+    b = _load(out)
+    idx = {n: i for i, n in enumerate(b["cards"])}
+    # metrics: [gihwr, alsa, ata, ohwr, gdwr, gpwr, gih_count]
+    assert b["metrics"][str(idx["Alpha"])] == [0.601, 4.25, 5.26, 0.617, 0.592, 0.587, 45613]
+    # cards present only in metrics are still indexed; cards without metrics simply absent
+    assert str(idx["Gamma"]) not in b["metrics"]
 
 
 def test_trophy_min_seen_filter(artifacts, tmp_path):

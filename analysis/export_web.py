@@ -11,11 +11,13 @@ Compact format (card names are interned into an index to keep the file small):
 {
   "set": "SOS", "format": "PremierDraft", "generated_at": "...",
   "schema": {
+    "metrics": "idx -> [gihwr, alsa, ata, ohwr, gdwr, gpwr, gih_count]",
     "trophy":  "idx -> [rate_delta, ata_delta, seen_trophy]",
     "cooc":    "idx -> [[partner_idx, lift], ...]   (top partners, lift desc)",
     "synergy": "idx -> [[partner_idx, delta], ...]  (top partners, |delta| desc)"
   },
   "cards":   ["Card A", "Card B", ...],   # index -> card name
+  "metrics": { "0": [0.601, 4.25, 5.26, 0.617, 0.592, 0.587, 45613], ... },
   "trophy":  { "0": [0.036, -0.4, 1461], ... },
   "cooc":    { "0": [[12, 2.37], [5, 2.09], ...], ... },
   "synergy": { "0": [[7, 0.099], [3, 0.094], ...], ... }
@@ -72,6 +74,7 @@ def export_web(
 
     trophy_path = art / f"{expansion}.{event_type}.trophy_pick_stats.parquet"
     synergy_path = art / f"{expansion}.{event_type}.synergy.parquet"
+    metrics_path = art / f"{expansion}.{event_type}.card_metrics.parquet"
     # Prefer trophy co-occurrence, fall back to all (same as context_advisor).
     cooc_path = art / f"{expansion}.{event_type}.cooccurrence.trophy.parquet"
     if not cooc_path.exists():
@@ -109,6 +112,16 @@ def export_web(
         ).fetchall()
         for r in syn_rows:
             names.add(r[0]); names.add(r[1])
+
+    metrics_rows = []
+    if metrics_path.exists():
+        metrics_rows = con.execute(
+            f"SELECT card_name, gihwr, alsa, ata, ohwr, gdwr, gpwr, gih_count "
+            f"FROM read_parquet('{metrics_path}')"
+        ).fetchall()
+        for r in metrics_rows:
+            if r[0]:
+                names.add(r[0])
     con.close()
 
     cards = sorted(names)
@@ -131,16 +144,29 @@ def export_web(
     # --- Synergy: idx_x -> top [[idx_y, delta], ...] by |delta| desc ---
     synergy = _adjacency(syn_rows, idx, max_partners, value_round=4, by_abs=True)
 
+    # --- Metrics: idx -> [gihwr, alsa, ata, ohwr, gdwr, gpwr, gih_count] ---
+    metrics: dict[str, list] = {}
+    for card_name, gihwr, alsa, ata, ohwr, gdwr, gpwr, gih_count in metrics_rows:
+        if not card_name:
+            continue
+        metrics[str(idx[card_name])] = [
+            _round(gihwr, 4), _round(alsa, 2), _round(ata, 2),
+            _round(ohwr, 4), _round(gdwr, 4), _round(gpwr, 4),
+            int(gih_count or 0),
+        ]
+
     bundle = {
         "set": expansion,
         "format": event_type,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "schema": {
+            "metrics": "idx -> [gihwr, alsa, ata, ohwr, gdwr, gpwr, gih_count]",
             "trophy": "idx -> [rate_delta, ata_delta, seen_trophy]",
             "cooc": "idx -> [[partner_idx, lift], ...] (lift desc)",
             "synergy": "idx -> [[partner_idx, delta], ...] (|delta| desc)",
         },
         "cards": cards,
+        "metrics": metrics,
         "trophy": trophy,
         "cooc": cooc,
         "synergy": synergy,
@@ -152,8 +178,8 @@ def export_web(
 
     size_kb = out_path.stat().st_size / 1024
     logger.info(
-        "Wrote %s (%.0f KB): %d cards, %d trophy, %d cooc-src, %d syn-src",
-        out_path.name, size_kb, len(cards), len(trophy), len(cooc), len(synergy),
+        "Wrote %s (%.0f KB): %d cards, %d metrics, %d trophy, %d cooc-src, %d syn-src",
+        out_path.name, size_kb, len(cards), len(metrics), len(trophy), len(cooc), len(synergy),
     )
     return out_path
 

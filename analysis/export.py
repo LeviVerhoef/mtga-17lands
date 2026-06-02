@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from analysis.ingest import DatasetIngestor
-from analysis import trophy, cooccurrence, synergy, similar_pools
+from analysis import trophy, cooccurrence, synergy, similar_pools, card_metrics
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -61,6 +61,14 @@ def run_pipeline(
     except Exception as exc:
         logger.error("Trophy computation failed: %s", exc)
         manifest["errors"]["trophy_pick_stats"] = str(exc)
+
+    # 2b. Per-card metrics (GIHWR/OHWR/GDWR/GPWR/ALSA/ATA) from bulk
+    try:
+        path = card_metrics.compute(expansion, event_type, ingestor=ing)
+        manifest["artifacts"]["card_metrics"] = str(path)
+    except Exception as exc:
+        logger.error("Card metrics computation failed: %s", exc)
+        manifest["errors"]["card_metrics"] = str(exc)
 
     # 3. Co-occurrence (trophy pools and all pools)
     for t_only, label in [(True, "cooccurrence_trophy"), (False, "cooccurrence_all")]:
