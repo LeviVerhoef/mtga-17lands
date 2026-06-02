@@ -71,6 +71,19 @@ the set-based pipeline runs in ~4 min (BLB: 6M draft rows / 931k games); reruns
 reuse the local DuckDB cache. The small trophy/co-occurrence/synergy artifacts are
 committed to git; the larger similar-pools indexes are regenerated locally.
 
+## 5. Export the web context bundle (for the Overwolf overlay)
+
+```bash
+python3 -m analysis.export_web --all          # every set in data/artifacts/
+python3 -m analysis.export_web --expansion SOS  # a single set
+```
+
+Converts the committed parquet artifacts into a compact
+`web/data/<SET>.<FORMAT>.context.json` (~0.3–0.9 MB/set) that the future
+Overwolf front-end loads. It reproduces the exact trophy / co-occurrence /
+synergy signals from `analysis.context_advisor`. See
+`docs/06-overwolf-overlay-plan.md` for the overlay plan.
+
 ## Directory layout
 
 ```
