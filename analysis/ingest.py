@@ -140,9 +140,13 @@ class DatasetIngestor:
             return tname
 
         logger.info("Loading %s into DuckDB table '%s'...", gz.name, tname)
+        # ignore_errors: some 17Lands published files contain a trailing garbage
+        # row (e.g. a line of null bytes in AFR). Skip such rows rather than abort
+        # the whole load; legitimate data is unaffected.
         con.execute(f"""
             CREATE TABLE "{tname}" AS
-            SELECT * FROM read_csv_auto('{gz}', compression='gzip', header=True)
+            SELECT * FROM read_csv_auto('{gz}', compression='gzip', header=True,
+                                        ignore_errors=true)
         """)
         count = con.execute(f'SELECT COUNT(*) FROM "{tname}"').fetchone()[0]
         logger.info("Loaded %d rows into '%s'", count, tname)
