@@ -116,6 +116,19 @@ def test_write_and_load_manifest(tmp_path):
     assert ("SOS", "PremierDraft") in idx
 
 
+def test_cleanup_set_removes_intermediates(tmp_path, monkeypatch):
+    gz1 = tmp_path / "draft.gz"; gz1.write_text("x")
+    gz2 = tmp_path / "game.gz"; gz2.write_text("x")
+    db = tmp_path / "set.duckdb"; db.write_text("x")
+    monkeypatch.setattr(sync, "_local_gz",
+                        lambda kind, e, f: gz1 if kind == "draft_data" else gz2)
+    monkeypatch.setattr(sync, "_db_path", lambda e, f: db)
+    sync.cleanup_set("SOS", "PremierDraft")
+    assert not gz1.exists() and not gz2.exists() and not db.exists()
+    # idempotent: second call with files already gone doesn't raise
+    sync.cleanup_set("SOS", "PremierDraft")
+
+
 def test_rebuild_manifest_preserves_source_last_modified(tmp_path):
     web = tmp_path / "web"
     _write_bundle(web, "SOS")

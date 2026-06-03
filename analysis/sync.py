@@ -33,10 +33,11 @@ from pathlib import Path
 import httpx
 
 from analysis import export, export_web
-from analysis.ingest import _s3_url  # reuse the canonical S3 URL builder
+from analysis.ingest import _s3_url, _local_gz, _db_path  # canonical paths
 
 logger = logging.getLogger(__name__)
 
+_DATA = Path(__file__).parent.parent / "data"
 _WEB_DIR = Path(__file__).parent.parent / "web" / "data"
 _MANIFEST = _WEB_DIR / "manifest.json"
 _HEADERS = {"User-Agent": "mtga-17lands/1.0 (github.com/LeviVerhoef/mtga-17lands)"}
@@ -184,8 +185,23 @@ def rebuild_manifest_from_disk(base_url: str = "", web_dir: Path = _WEB_DIR,
 # Orchestration
 # ---------------------------------------------------------------------------
 
+def cleanup_set(expansion: str, event_type: str) -> None:
+    """Delete the large local intermediates (bulk .csv.gz + DuckDB) for a set,
+    keeping only the small committed artifacts + web bundle. Used for back-catalog
+    builds and CI runners with limited disk."""
+    for kind in ("draft_data", "game_data"):
+        gz = _local_gz(kind, expansion, event_type)
+        if gz.exists():
+            gz.unlink()
+    db = _db_path(expansion, event_type)
+    if db.exists():
+        db.unlink()
+    logger.info("Cleaned up bulk + duckdb for %s.%s", expansion, event_type)
+
+
 def sync(pairs: list[tuple[str, str]], base_url: str = "", force: bool = False,
-         manifest_path: Path = _MANIFEST, web_dir: Path = _WEB_DIR) -> dict:
+         manifest_path: Path = _MANIFEST, web_dir: Path = _WEB_DIR,
+         cleanup: bool = False) -> dict:
     """Refresh the given (expansion, event_type) pairs and rewrite the manifest.
 
     Returns a summary dict {built: [...], skipped: [...], failed: {...}}.
@@ -213,9 +229,14 @@ def sync(pairs: list[tuple[str, str]], base_url: str = "", force: bool = False,
                 export_web.export_web(expansion, event_type)
                 index[key] = bundle_entry(expansion, event_type, remote_lm, base_url, web_dir)
                 summary["built"].append(f"{expansion}.{event_type}")
+                if cleanup:
+                    cleanup_set(expansion, event_type)
             except Exception as exc:
                 logger.error("Refresh failed for %s.%s: %s", expansion, event_type, exc)
                 summary["failed"][f"{expansion}.{event_type}"] = str(exc)
+            # Persist the manifest after each set so a long back-catalog run is
+            # resumable and progress isn't lost on interruption.
+            write_manifest(list(index.values()), manifest_path)
 
     write_manifest(list(index.values()), manifest_path)
     logger.info("Sync done: %d built, %d skipped, %d failed",
@@ -240,6 +261,8 @@ def _cli():
     p.add_argument("--manifest-only", action="store_true",
                    help="Rebuild manifest.json from existing bundles (no network/compute)")
     p.add_argument("--force", action="store_true", help="Rebuild regardless of Last-Modified")
+    p.add_argument("--cleanup", action="store_true",
+                   help="Delete each set's bulk .csv.gz + DuckDB after bundling (low disk)")
     p.add_argument("--base-url", default="", help="CDN base URL to prefix bundle paths")
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -255,7 +278,7 @@ def _cli():
         pairs = [(s, args.event_type) for s in args.sets]
     else:
         p.error("provide --sets, --refresh-existing, or --manifest-only")
-    sync(pairs, base_url=args.base_url, force=args.force)
+    sync(pairs, base_url=args.base_url, force=args.force, cleanup=args.cleanup)
 
 
 if __name__ == "__main__":
